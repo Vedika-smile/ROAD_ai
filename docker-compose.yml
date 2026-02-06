@@ -28,18 +28,9 @@ services:
       - "9000:9000"
       - "9001:9001"
 
-  worker-gpu:
-    build:
-      context: ./workers
-      dockerfile: Dockerfile.gpu
+  worker:
+    build: ./workers
     env_file: .env
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     depends_on:
       - redis
       - minio

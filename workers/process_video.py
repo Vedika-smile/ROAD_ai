@@ -12,25 +12,27 @@ MODEL_PATH = "/app/models/YOLOv8_Small_RDD.pt"
 INPUT_TMP = "/tmp/input.mp4"
 OUTPUT_TMP = "/tmp/output.mp4"
 RESULT_PREFIX = "results/"
+STREAM_NAME = "video_jobs"
+GROUP_NAME = "workers"
 # ----------------------------
 
-# Redis
+# ---------- REDIS ----------
 r = redis.Redis.from_url(os.getenv("REDIS_URL"))
 
-# Create consumer group (safe if already exists)
+# Create consumer group (safe if exists)
 try:
-    r.xgroup_create("video_jobs", "workers", id="0", mkstream=True)
+    r.xgroup_create(STREAM_NAME, GROUP_NAME, id="0", mkstream=True)
 except redis.exceptions.ResponseError:
     pass
 
 consumer = os.getenv("HOSTNAME", "worker-1")
 
-# MongoDB
+# ---------- MONGO ----------
 mongo = MongoClient(os.getenv("MONGO_URI"))
 db = mongo[os.getenv("MONGO_DB")]
 videos = db.videos
 
-# MinIO / S3
+# ---------- MINIO / S3 ----------
 s3 = boto3.client(
     "s3",
     endpoint_url=os.getenv("S3_ENDPOINT"),
@@ -38,23 +40,34 @@ s3 = boto3.client(
     aws_secret_access_key=os.getenv("S3_SECRET_KEY"),
 )
 
-# Load YOLO ONCE
+# ---------- YOLO ----------
 if not os.path.exists(MODEL_PATH):
-    raise RuntimeError(f"Model not found at {MODEL_PATH}")
+    raise RuntimeError(f"Model not found: {MODEL_PATH}")
 
 model = YOLO(MODEL_PATH)
-model.to("cuda").half()
 
+# # GPU (comment this line if CPU-only)
+# try:
+#     model.to("cuda")
+#     print("YOLO running on GPU")
+# except Exception:
+#     print("YOLO running on CPU")
 
-# ---------- WORKER LOOP ----------
+print("Worker ready")
+
+# ========== WORKER LOOP ==========
 while True:
     streams = r.xreadgroup(
-        groupname="workers",
+        groupname=GROUP_NAME,
         consumername=consumer,
-        streams={"video_jobs": ">"},
+        streams={STREAM_NAME: ">"},
         count=1,
         block=5000
     )
+
+    # Block timeout returns None or []; avoid crash on None
+    if not streams:
+        continue
 
     for _, messages in streams:
         for message_id, data in messages:
@@ -62,24 +75,38 @@ while True:
             input_key = f"{video_id}.mp4"
             output_key = f"{RESULT_PREFIX}{video_id}_detected.mp4"
 
-            print(f"[{video_id}] started")
+            # ---------- IDEMPOTENCY CHECK ----------
+            doc = videos.find_one({"_id": video_id})
+            if doc:
+                if doc.get("status") == "DONE":
+                    r.xack(STREAM_NAME, GROUP_NAME, message_id)
+                    print(f"[{video_id}] already DONE → skipped")
+                    continue
+                if doc.get("status") == "FAILED":
+                    r.xack(STREAM_NAME, GROUP_NAME, message_id)
+                    print(f"[{video_id}] already FAILED → skipped")
+                    continue
+
+            print(f"[{video_id}] processing")
 
             try:
+                print(f"[{video_id}] marking PROCESSING")
                 # Mark PROCESSING
                 videos.update_one(
                     {"_id": video_id},
                     {"$set": {
                         "status": "PROCESSING",
                         "updated_at": datetime.datetime.utcnow()
-                    }}
+                    }},
+                    upsert=True
                 )
 
-                # Download input
+                # Download input video
                 s3.download_file(os.getenv("S3_BUCKET"), input_key, INPUT_TMP)
 
                 cap = cv2.VideoCapture(INPUT_TMP)
                 if not cap.isOpened():
-                    raise RuntimeError("Could not open video")
+                    raise RuntimeError("Cannot open video")
 
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -103,7 +130,6 @@ while True:
 
                     results = model(frame, conf=0.25, verbose=False)
 
-                    # Count detections
                     for box in results[0].boxes:
                         cls_id = int(box.cls[0])
                         cls_name = model.names[cls_id]
@@ -123,7 +149,7 @@ while True:
                     output_key
                 )
 
-                # Save stats to MongoDB
+                # Save final result
                 videos.update_one(
                     {"_id": video_id},
                     {"$set": {
@@ -135,8 +161,9 @@ while True:
                     }}
                 )
 
-                r.xack("video_jobs", "workers", message_id)
-                print(f"[{video_id}] done ({frame_count} frames)")
+                # ACK MESSAGE
+                r.xack(STREAM_NAME, GROUP_NAME, message_id)
+                print(f"[{video_id}] DONE ({frame_count} frames)")
 
             except Exception as e:
                 print(f"[{video_id}] FAILED:", e)
@@ -149,3 +176,5 @@ while True:
                         "updated_at": datetime.datetime.utcnow()
                     }}
                 )
+                # ACK so this message is not re-delivered forever
+                r.xack(STREAM_NAME, GROUP_NAME, message_id)
