@@ -5,20 +5,19 @@ import cv2
 import datetime
 from pymongo import MongoClient
 from ultralytics import YOLO
+from collections import defaultdict
 
 # ---------- CONFIG ----------
 MODEL_PATH = "/app/models/YOLOv8_Small_RDD.pt"
 INPUT_TMP = "/tmp/input.mp4"
 OUTPUT_TMP = "/tmp/output.mp4"
-OUTPUT_BUCKET_PREFIX = "results/"
+RESULT_PREFIX = "results/"
 # ----------------------------
-
-print("redis url:", os.getenv("REDIS_URL"))
 
 # Redis
 r = redis.Redis.from_url(os.getenv("REDIS_URL"))
 
-# Create consumer group (safe to run repeatedly)
+# Create consumer group (safe if already exists)
 try:
     r.xgroup_create("video_jobs", "workers", id="0", mkstream=True)
 except redis.exceptions.ResponseError:
@@ -39,12 +38,13 @@ s3 = boto3.client(
     aws_secret_access_key=os.getenv("S3_SECRET_KEY"),
 )
 
-# Load YOLO once (IMPORTANT)
+# Load YOLO ONCE
 if not os.path.exists(MODEL_PATH):
     raise RuntimeError(f"Model not found at {MODEL_PATH}")
 
 model = YOLO(MODEL_PATH)
-print("YOLO model loaded")
+model.to("cuda").half()
+
 
 # ---------- WORKER LOOP ----------
 while True:
@@ -60,12 +60,12 @@ while True:
         for message_id, data in messages:
             video_id = data[b"video_id"].decode()
             input_key = f"{video_id}.mp4"
-            output_key = f"{OUTPUT_BUCKET_PREFIX}{video_id}_detected.mp4"
+            output_key = f"{RESULT_PREFIX}{video_id}_detected.mp4"
 
-            print(f"[{video_id}] Processing started")
+            print(f"[{video_id}] started")
 
             try:
-                # Update DB → PROCESSING
+                # Mark PROCESSING
                 videos.update_one(
                     {"_id": video_id},
                     {"$set": {
@@ -74,7 +74,7 @@ while True:
                     }}
                 )
 
-                # Download input video
+                # Download input
                 s3.download_file(os.getenv("S3_BUCKET"), input_key, INPUT_TMP)
 
                 cap = cv2.VideoCapture(INPUT_TMP)
@@ -85,17 +85,30 @@ while True:
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out = cv2.VideoWriter(OUTPUT_TMP, fourcc, fps, (w, h))
+                out = cv2.VideoWriter(
+                    OUTPUT_TMP,
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    fps,
+                    (w, h)
+                )
 
+                detection_stats = defaultdict(int)
                 frame_count = 0
 
+                # ---------- FRAME LOOP ----------
                 while True:
                     success, frame = cap.read()
                     if not success:
                         break
 
                     results = model(frame, conf=0.25, verbose=False)
+
+                    # Count detections
+                    for box in results[0].boxes:
+                        cls_id = int(box.cls[0])
+                        cls_name = model.names[cls_id]
+                        detection_stats[cls_name] += 1
+
                     annotated = results[0].plot()
                     out.write(annotated)
                     frame_count += 1
@@ -103,26 +116,27 @@ while True:
                 cap.release()
                 out.release()
 
-                # Upload result
+                # Upload result video
                 s3.upload_file(
                     OUTPUT_TMP,
                     os.getenv("S3_BUCKET"),
                     output_key
                 )
 
-                # Update DB → DONE
+                # Save stats to MongoDB
                 videos.update_one(
                     {"_id": video_id},
                     {"$set": {
                         "status": "DONE",
                         "frames": frame_count,
+                        "detection_stats": dict(detection_stats),
                         "result_key": output_key,
                         "updated_at": datetime.datetime.utcnow()
                     }}
                 )
 
                 r.xack("video_jobs", "workers", message_id)
-                print(f"[{video_id}] Done ({frame_count} frames)")
+                print(f"[{video_id}] done ({frame_count} frames)")
 
             except Exception as e:
                 print(f"[{video_id}] FAILED:", e)

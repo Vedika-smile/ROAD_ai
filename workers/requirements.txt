@@ -1,5 +1,7 @@
 ultralytics
 opencv-python
+torch
+torchvision
 boto3
 redis
 pymongo
