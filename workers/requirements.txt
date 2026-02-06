@@ -1,4 +1,5 @@
+ultralytics
+opencv-python
 boto3
 redis
-opencv-python
 pymongo
