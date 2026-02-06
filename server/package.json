@@ -1,0 +1,28 @@
+{
+  "name": "road-pothole-backend-node",
+  "version": "1.0.0",
+  "description": "Node.js backend for pothole detections with MongoDB and Cloudinary video URLs",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "keywords": [
+    "express",
+    "mongodb",
+    "potholes",
+    "cloudinary"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0",
+    "mongoose": "^8.3.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
+
