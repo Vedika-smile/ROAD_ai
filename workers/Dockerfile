@@ -17,8 +17,8 @@ RUN pip install \
     --retries 10 \
     -r requirements.txt
 
-
-COPY process_video.py .
+COPY process_video.py process_cctv.py sort.py ./
 COPY models ./models
 
+# Default: run video worker (override in docker-compose for cctv worker)
 CMD ["python", "process_video.py"]

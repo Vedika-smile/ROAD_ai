@@ -1,20 +1,25 @@
-version: "3.9"
-
 services:
   api:
     build: ./api
     ports:
       - "8000:8000"
     env_file: .env
-    volumes:
-      - ./api:/app
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      REDIS_URL: redis://redis:6379
+      MONGO_URI: mongodb://mongo:27017
     depends_on:
-      - redis
-      - minio
-      - mongo
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+      mongo:
+        condition: service_started
+    restart: unless-stopped
 
   redis:
     image: redis:7
+    restart: unless-stopped
 
   minio:
     image: minio/minio
@@ -23,27 +28,53 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:
-      - ./storage/minio-data:/data
+      - minio_data:/data
     ports:
       - "9000:9000"
       - "9001:9001"
-
-  worker:
-    build: ./workers
-    env_file: .env
-    depends_on:
-      - redis
-      - minio
-      - mongo
+    restart: unless-stopped
 
   mongo:
     image: mongo:7
-    container_name: mongo
     ports:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+    restart: unless-stopped
 
+  worker-video:
+    build: ./workers
+    env_file: .env
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      REDIS_URL: redis://redis:6379
+      MONGO_URI: mongodb://mongo:27017
+    depends_on:
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+      mongo:
+        condition: service_started
+    restart: unless-stopped
+
+  worker-cctv:
+    build: ./workers
+    command: ["python", "process_cctv.py"]
+    env_file: .env
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      REDIS_URL: redis://redis:6379
+      MONGO_URI: mongodb://mongo:27017
+    depends_on:
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+      mongo:
+        condition: service_started
+    restart: unless-stopped
 
 volumes:
   mongo_data:
+  minio_data:

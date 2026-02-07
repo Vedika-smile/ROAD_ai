@@ -21,7 +21,67 @@ s3 = boto3.client(
 
 r = redis.Redis.from_url(os.getenv("REDIS_URL"))
 
-from datetime import datetime, timezone
+
+@app.on_event("startup")
+def ensure_bucket():
+    bucket = os.getenv("S3_BUCKET", "videos")
+    try:
+        s3.create_bucket(Bucket=bucket)
+    except Exception:
+        pass  # Bucket already exists
+
+
+@app.put("/cctv")
+async def upload_cctv_video(
+    file: UploadFile = File(...),
+    gps_coords: str = Form(..., description="JSON list of GPS coordinates"),
+):
+    # ---------- Validate GPS ----------
+    try:
+        coords = json.loads(gps_coords)
+    except json.JSONDecodeError:
+        raise HTTPException(422, "gps_coords must be valid JSON")
+
+    if not isinstance(coords, list) or not coords:
+        raise HTTPException(422, "gps_coords must be a non-empty list")
+
+    # ---------- Validate file ----------
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(400, "Uploaded file is empty")
+
+    video_id = str(uuid.uuid4())
+    object_key = f"{video_id}.mp4"
+
+    # ---------- Save metadata FIRST ----------
+    videos.insert_one({
+        "_id": video_id,
+        "source": "CCTV",
+        "filename": file.filename,
+        "status": "UPLOADED",
+        "gps_coords": coords,
+        "created_at": datetime.datetime.now(datetime.timezone.utc),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc),
+    })
+
+    # ---------- Upload to MinIO / S3 ----------
+    s3.put_object(
+        Bucket=os.getenv("S3_BUCKET"),
+        Key=object_key,
+        Body=contents,
+        ContentType=file.content_type or "video/mp4",
+    )
+
+    # ---------- Enqueue for CCTV processing ----------
+    r.xadd("vehicle_count_jobs", {"video_id": video_id, "gps_coords": json.dumps(coords)})
+
+    return {
+        "video_id": video_id,
+        "status": "UPLOADED",
+        "source": "CCTV",
+    }
+
+
 
 @app.post("/videos")
 async def upload_video(
@@ -52,8 +112,8 @@ async def upload_video(
         "status": "UPLOADED",
         "frames": None,
         "gps_coords": coords,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc),
+        "created_at": datetime.datetime.now(datetime.timezone.utc),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc),
     })
 
     # ---- UPLOAD TO MINIO / S3 ----

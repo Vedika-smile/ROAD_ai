@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 # ---------- CONFIG ----------
-MODEL_PATH = "/media/OS/ShmokeD/Projects/bullshit/ROAD_ai/workers/models/YOLOv8_Small_RDD.pt"
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "YOLOv8_Small_RDD.pt")
 INPUT_TMP = "/tmp/input.mp4"
 OUTPUT_TMP = "/tmp/output.mp4"
 RESULT_PREFIX = "results/"

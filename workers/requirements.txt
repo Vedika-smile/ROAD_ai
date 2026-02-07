@@ -3,3 +3,8 @@ opencv-python-headless
 boto3
 redis
 pymongo
+python-dotenv
+filterpy
+scipy
+scikit-image
+lap
