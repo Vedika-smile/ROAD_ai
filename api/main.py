@@ -2,6 +2,9 @@ import json
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pymongo import MongoClient
 import boto3, redis, uuid, os, datetime
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 app = FastAPI()
 
@@ -18,40 +21,64 @@ s3 = boto3.client(
 
 r = redis.Redis.from_url(os.getenv("REDIS_URL"))
 
+from datetime import datetime, timezone
+
 @app.post("/videos")
 async def upload_video(
     file: UploadFile = File(...),
-    gps_coords: str = Form(..., description="JSON array of [lat, lng] coordinates, e.g. [[52.52, 13.405], [52.53, 13.41]]"),
+    gps_coords: str = Form(...),
 ):
+    # ---- validate GPS ----
     try:
         coords = json.loads(gps_coords)
     except json.JSONDecodeError:
         raise HTTPException(422, "gps_coords must be valid JSON")
+
     if not isinstance(coords, list):
         raise HTTPException(422, "gps_coords must be a list")
 
+    # ---- generate id ----
     vid = str(uuid.uuid4())
 
-    s3.upload_fileobj(file.file, os.getenv("S3_BUCKET"), f"{vid}.mp4")
+    # ---- READ FILE SAFELY ----
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(400, "Uploaded file is empty")
 
+    # ---- DB INSERT (acts as lock) ----
     videos.insert_one({
         "_id": vid,
         "filename": file.filename,
         "status": "UPLOADED",
         "frames": None,
         "gps_coords": coords,
-        "created_at": datetime.datetime.utcnow(),
-        "updated_at": datetime.datetime.utcnow()
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
     })
 
+    # ---- UPLOAD TO MINIO / S3 ----
+    s3.put_object(
+        Bucket=os.getenv("S3_BUCKET"),
+        Key=f"{vid}.mp4",
+        Body=contents,
+        ContentType=file.content_type or "video/mp4",
+    )
+
+    # ---- ENQUEUE EXACTLY ONCE ----
     r.xadd("video_jobs", {"video_id": vid})
 
     return {"video_id": vid}
+
 
 @app.get("/videos/{video_id}")
 def get_video(video_id: str):
     doc = videos.find_one({"_id": video_id}, {"_id": 0})
     return doc
+
+@app.get("/videos")
+def list_videos():
+    docs = videos.find({}, {"_id": 0})
+    return list(docs)
 
 
 @app.get("/")

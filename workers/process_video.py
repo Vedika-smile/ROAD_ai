@@ -6,9 +6,12 @@ import datetime
 from pymongo import MongoClient
 from ultralytics import YOLO
 from collections import defaultdict
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 # ---------- CONFIG ----------
-MODEL_PATH = "/app/models/YOLOv8_Small_RDD.pt"
+MODEL_PATH = "/media/OS/ShmokeD/Projects/bullshit/ROAD_ai/workers/models/YOLOv8_Small_RDD.pt"
 INPUT_TMP = "/tmp/input.mp4"
 OUTPUT_TMP = "/tmp/output.mp4"
 RESULT_PREFIX = "results/"
@@ -57,6 +60,7 @@ print("Worker ready")
 
 # ========== WORKER LOOP ==========
 while True:
+    print("Waiting for jobs...")
     streams = r.xreadgroup(
         groupname=GROUP_NAME,
         consumername=consumer,
@@ -102,6 +106,7 @@ while True:
                 )
 
                 # Download input video
+                print(f"[{video_id}] downloading from S3")
                 s3.download_file(os.getenv("S3_BUCKET"), input_key, INPUT_TMP)
 
                 cap = cv2.VideoCapture(INPUT_TMP)
@@ -178,3 +183,6 @@ while True:
                 )
                 # ACK so this message is not re-delivered forever
                 r.xack(STREAM_NAME, GROUP_NAME, message_id)
+
+
+print("Worker stopped")
